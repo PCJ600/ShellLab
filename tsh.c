@@ -1,4 +1,4 @@
-/* 
+/*
  * tsh - A tiny shell program with job control
  * 
  * <Put your name and login ID here>
@@ -103,16 +103,16 @@ int main(int argc, char **argv)
         switch (c) {
         case 'h':             /* print help message */
             usage();
-	    break;
+	        break;
         case 'v':             /* emit additional diagnostic info */
             verbose = 1;
-	    break;
+	        break;
         case 'p':             /* don't print a prompt */
             emit_prompt = 0;  /* handy for automatic testing */
-	    break;
-	default:
+	        break;
+	    default:
             usage();
-	}
+	    }
     }
 
     /* Install the signal handlers */
@@ -130,25 +130,22 @@ int main(int argc, char **argv)
 
     /* Execute the shell's read/eval loop */
     while (1) {
-
-	/* Read command line */
-	if (emit_prompt) {
-	    printf("%s", prompt);
-	    fflush(stdout);
-	}
-	if ((fgets(cmdline, MAXLINE, stdin) == NULL) && ferror(stdin))
-	    app_error("fgets error");
-	if (feof(stdin)) { /* End of file (ctrl-d) */
-	    fflush(stdout);
-	    exit(0);
-	}
-
-	/* Evaluate the command line */
-	eval(cmdline);
-	fflush(stdout);
-	fflush(stdout);
+        /* Read command line */
+        if (emit_prompt) {
+            printf("%s", prompt);
+            fflush(stdout);
+        }
+        if ((fgets(cmdline, MAXLINE, stdin) == NULL) && ferror(stdin))
+            app_error("fgets error");
+        if (feof(stdin)) { /* End of file (ctrl-d) */
+            fflush(stdout);
+            exit(0);
+        }
+        /* Evaluate the command line */
+        eval(cmdline);
+        fflush(stdout);
+        fflush(stdout);
     } 
-
     exit(0); /* control never reaches here */
 }
   
@@ -165,6 +162,40 @@ int main(int argc, char **argv)
 */
 void eval(char *cmdline) 
 {
+    char *argv[MAXARGS];
+    char buf[MAXLINE];
+    int bg;
+    pid_t pid;
+
+    strcpy(buf, cmdline);
+    bg = parseline(buf, argv);
+    if(argv[0] == NULL) {
+        return;
+    }
+
+    if(!builtin_cmd(argv)) {    // 如果不是内建命令, 则调用fork, 在子进程中通过exec执行
+        if ((pid = fork()) == 0) {
+            if (execve(argv[0], argv, environ) < 0) {
+                printf("%s: Command not found.\n", argv[0]);
+                exit(0);
+            }
+        }
+
+        // UNIX系统发送信号是基于进程组的,实验中不能将信号直接发给shell
+        // 而是需要让shell将信号转发给前台。作业中的子进程及其所属进程组中的所有进程
+        // 调用setpgid(0, 0)时，会创建一个新的进程组，其进程组ID是调用者进程PID
+        setpgid(0, 0);
+        
+        // addjob和deletejob之间存在时序问题, 原因在于子进程可能先于父进程结束
+        // 父进程执行addjob前，可能子进程已终止，并发送SIGCHLD信号, 先调用了deletejob
+        if(!bg) {                                       // 前台进程
+            addjob(jobs, pid, FG, cmdline);
+            waitfg(pid);
+        } else {                                        // 后台进程
+            addjob(jobs, pid, BG, cmdline);
+            printf("[%d] (%d) %s", pid2jid(pid), pid, cmdline);
+        }
+    }
     return;
 }
 
@@ -231,6 +262,24 @@ int parseline(const char *cmdline, char **argv)
  */
 int builtin_cmd(char **argv) 
 {
+    if(!strcmp(argv[0], "quit")) {
+        exit(0);
+    }
+
+    if(!strcmp(argv[0], "&")) {
+        return 1;
+    }
+
+    if(!strcmp(argv[0], "jobs")) {
+        listjobs(jobs);
+        return 1;
+    }
+
+    if(!strcmp(argv[0], "bg") || !strcmp(argv[0], "fg")) {
+        do_bgfg(argv);
+        return 1;
+    }
+
     return 0;     /* not a builtin command */
 }
 
@@ -239,6 +288,10 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
+
+
+
+
     return;
 }
 
@@ -247,6 +300,10 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
+    while(pid == fgpid(jobs)) {
+        sleep(1);
+    }
+
     return;
 }
 
@@ -263,6 +320,12 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
+    int status;
+    int pid;
+    pid = waitpid(-1, &status, 0);
+    if (pid > 0) {
+        deletejob(jobs, pid);
+    }
     return;
 }
 
@@ -325,23 +388,22 @@ int maxjid(struct job_t *jobs)
 int addjob(struct job_t *jobs, pid_t pid, int state, char *cmdline) 
 {
     int i;
-    
     if (pid < 1)
-	return 0;
+	    return 0;
 
     for (i = 0; i < MAXJOBS; i++) {
-	if (jobs[i].pid == 0) {
-	    jobs[i].pid = pid;
-	    jobs[i].state = state;
-	    jobs[i].jid = nextjid++;
-	    if (nextjid > MAXJOBS)
-		nextjid = 1;
-	    strcpy(jobs[i].cmdline, cmdline);
-  	    if(verbose){
-	        printf("Added job [%d] %d %s\n", jobs[i].jid, jobs[i].pid, jobs[i].cmdline);
+        if (jobs[i].pid == 0) {
+            jobs[i].pid = pid;
+            jobs[i].state = state;
+            jobs[i].jid = nextjid++;
+            if (nextjid > MAXJOBS)
+                nextjid = 1;
+            strcpy(jobs[i].cmdline, cmdline);
+            if(verbose) {
+                printf("Added job [%d] %d %s\n", jobs[i].jid, jobs[i].pid, jobs[i].cmdline);
             }
             return 1;
-	}
+        }
     }
     printf("Tried to create too many jobs\n");
     return 0;
@@ -351,16 +413,15 @@ int addjob(struct job_t *jobs, pid_t pid, int state, char *cmdline)
 int deletejob(struct job_t *jobs, pid_t pid) 
 {
     int i;
-
     if (pid < 1)
-	return 0;
+	    return 0;
 
     for (i = 0; i < MAXJOBS; i++) {
-	if (jobs[i].pid == pid) {
-	    clearjob(&jobs[i]);
-	    nextjid = maxjid(jobs)+1;
-	    return 1;
-	}
+        if (jobs[i].pid == pid) {
+            clearjob(&jobs[i]);
+            nextjid = maxjid(jobs)+1;
+            return 1;
+        }
     }
     return 0;
 }
