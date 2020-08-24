@@ -175,6 +175,7 @@ void eval(char *cmdline)
 
     if(!builtin_cmd(argv)) {    // 如果不是内建命令, 则调用fork, 在子进程中通过exec执行
         if ((pid = fork()) == 0) {
+            setpgid(0, 0);
             if (execve(argv[0], argv, environ) < 0) {
                 printf("%s: Command not found.\n", argv[0]);
                 exit(0);
@@ -184,13 +185,14 @@ void eval(char *cmdline)
         // UNIX系统发送信号是基于进程组的,实验中不能将信号直接发给shell
         // 而是需要让shell将信号转发给前台。作业中的子进程及其所属进程组中的所有进程
         // 调用setpgid(0, 0)时，会创建一个新的进程组，其进程组ID是调用者进程PID
-        setpgid(0, 0);
         
         // addjob和deletejob之间存在时序问题, 原因在于子进程可能先于父进程结束
         // 父进程执行addjob前，可能子进程已终止，并发送SIGCHLD信号, 先调用了deletejob
+        //
         if(!bg) {                                       // 前台进程
             addjob(jobs, pid, FG, cmdline);
-            waitfg(pid);
+            // printf("FG: [%d] (%d) %s", pid2jid(pid), pid, cmdline);
+            waitfg(pid);   
         } else {                                        // 后台进程
             addjob(jobs, pid, BG, cmdline);
             printf("[%d] (%d) %s", pid2jid(pid), pid, cmdline);
@@ -288,22 +290,20 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
-
-
-
-
     return;
 }
 
 /* 
  * waitfg - Block until process pid is no longer the foreground process
  */
+
+
+// SIGCHLD信号处理函数中已作wait, 这里只需忙等待
 void waitfg(pid_t pid)
 {
     while(pid == fgpid(jobs)) {
         sleep(1);
     }
-
     return;
 }
 
@@ -318,14 +318,19 @@ void waitfg(pid_t pid)
  *     available zombie children, but doesn't wait for any other
  *     currently running children to terminate.  
  */
+
 void sigchld_handler(int sig) 
 {
     int status;
     int pid;
-    pid = waitpid(-1, &status, 0);
-    if (pid > 0) {
+
+    while((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        if(WIFSIGNALED(status)) {
+            printf("Job [%d] (%d) terminated by signal %d\n", pid2jid(pid), pid, WTERMSIG(status));
+        }
         deletejob(jobs, pid);
     }
+
     return;
 }
 
@@ -336,6 +341,12 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
+    pid_t pid = fgpid(jobs);
+
+    // 给进程组为pid的所有前台进程发送SIGINT信号
+    if(pid > 0) {
+        kill(-pid, sig);
+    }
     return;
 }
 
@@ -346,6 +357,12 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
+    pid_t pid = fgpid(jobs);
+
+    // 给进程组为pid的所有前台进程发送SIGTSTP信号
+    if(pid > 0) {
+        kill(-pid, sig);
+    }
     return;
 }
 
@@ -412,6 +429,7 @@ int addjob(struct job_t *jobs, pid_t pid, int state, char *cmdline)
 /* deletejob - Delete a job whose PID=pid from the job list */
 int deletejob(struct job_t *jobs, pid_t pid) 
 {
+
     int i;
     if (pid < 1)
 	    return 0;
