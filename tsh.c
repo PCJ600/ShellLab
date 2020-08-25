@@ -191,7 +191,6 @@ void eval(char *cmdline)
         //
         if(!bg) {                                       // 前台进程
             addjob(jobs, pid, FG, cmdline);
-            // printf("FG: [%d] (%d) %s", pid2jid(pid), pid, cmdline);
             waitfg(pid);   
         } else {                                        // 后台进程
             addjob(jobs, pid, BG, cmdline);
@@ -288,8 +287,24 @@ int builtin_cmd(char **argv)
 /* 
  * do_bgfg - Execute the builtin bg and fg commands
  */
+
 void do_bgfg(char **argv) 
 {
+    if(!strcmp(argv[0], "bg")) {
+        if(argv[1] == NULL) {
+            return;
+        }
+
+        if(argv[1][0] == '%') {
+            int jid = atoi(argv[1]+1);
+            struct job_t *job = getjobjid(jobs, jid);
+            if(job == NULL) {
+                return;                 // 不存在后台作业
+            }
+            job->state = BG;
+            kill(-job->pid, SIGCONT);
+        }
+    }
     return;
 }
 
@@ -324,9 +339,17 @@ void sigchld_handler(int sig)
     int status;
     int pid;
 
-    while((pid = waitpid(-1, &status, WNOHANG)) > 0) {
-        if(WIFSIGNALED(status)) {
+    while((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) {
+        if (WIFSIGNALED(status)) {
             printf("Job [%d] (%d) terminated by signal %d\n", pid2jid(pid), pid, WTERMSIG(status));
+        } else if (WIFSTOPPED(status)) {
+            int jid = pid2jid(pid);
+            struct job_t* job = getjobjid(jobs, jid);
+            job->state = ST;
+            printf("Job [%d] (%d) stopped by signal %d\n", jid, pid, WSTOPSIG(status));
+            continue;
+        } else {
+            // printf("Job [%d] (%d) exited\n", pid2jid(pid), pid);
         }
         deletejob(jobs, pid);
     }
@@ -358,6 +381,9 @@ void sigint_handler(int sig)
 void sigtstp_handler(int sig) 
 {
     pid_t pid = fgpid(jobs);
+
+
+    printf("TSTP: %d\n", pid);
 
     // 给进程组为pid的所有前台进程发送SIGTSTP信号
     if(pid > 0) {
