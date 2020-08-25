@@ -304,6 +304,20 @@ void do_bgfg(char **argv)
             job->state = BG;
             kill(-job->pid, SIGCONT);
         }
+    } else {
+        if(argv[1] == NULL) {
+            return;
+        }
+        if(argv[1][0] == '%') {
+            int jid = atoi(argv[1] + 1);
+            struct job_t *job = getjobjid(jobs, jid);
+            if(job == NULL) {
+                return;
+            }
+            kill(-job->pid, SIGCONT);
+            job->state = FG;
+            waitfg(job->pid);
+        }
     }
     return;
 }
@@ -319,6 +333,7 @@ void waitfg(pid_t pid)
     while(pid == fgpid(jobs)) {
         sleep(1);
     }
+
     return;
 }
 
@@ -381,9 +396,6 @@ void sigint_handler(int sig)
 void sigtstp_handler(int sig) 
 {
     pid_t pid = fgpid(jobs);
-
-
-    printf("TSTP: %d\n", pid);
 
     // 给进程组为pid的所有前台进程发送SIGTSTP信号
     if(pid > 0) {
