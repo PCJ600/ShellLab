@@ -174,7 +174,13 @@ void eval(char *cmdline)
     }
 
     if(!builtin_cmd(argv)) {    // 如果不是内建命令, 则调用fork, 在子进程中通过exec执行
+        sigset_t newset, oldset;
+        sigemptyset(&newset);
+        sigaddset(&newset, SIGCHLD);
+        sigprocmask(SIG_BLOCK, &newset, &oldset);
+
         if ((pid = fork()) == 0) {
+            sigprocmask(SIG_SETMASK, &oldset, NULL);
             setpgid(0, 0);
             if (execve(argv[0], argv, environ) < 0) {
                 printf("%s: Command not found.\n", argv[0]);
@@ -182,18 +188,20 @@ void eval(char *cmdline)
             }
         }
 
-        // UNIX系统发送信号是基于进程组的,实验中不能将信号直接发给shell
+        // UNIX系统发送信号是基于进程组的,实验中不能将SIGINT, SIGTSTP信号直接作用于shell
         // 而是需要让shell将信号转发给前台。作业中的子进程及其所属进程组中的所有进程
         // 调用setpgid(0, 0)时，会创建一个新的进程组，其进程组ID是调用者进程PID
         
         // addjob和deletejob之间存在时序问题, 原因在于子进程可能先于父进程结束
         // 父进程执行addjob前，可能子进程已终止，并发送SIGCHLD信号, 先调用了deletejob
-        //
+        // 因此父进程里需先阻塞SIGCHLD信号，直到addjob成功之后解除阻塞, 子进程由于继承父进程信号，需要解除阻塞
         if(!bg) {                                       // 前台进程
             addjob(jobs, pid, FG, cmdline);
+            sigprocmask(SIG_SETMASK, &oldset, NULL);
             waitfg(pid);   
         } else {                                        // 后台进程
             addjob(jobs, pid, BG, cmdline);
+            sigprocmask(SIG_SETMASK, &oldset, NULL);
             printf("[%d] (%d) %s", pid2jid(pid), pid, cmdline);
         }
     }
@@ -288,38 +296,107 @@ int builtin_cmd(char **argv)
  * do_bgfg - Execute the builtin bg and fg commands
  */
 
-void do_bgfg(char **argv) 
-{
-    if(!strcmp(argv[0], "bg")) {
-        if(argv[1] == NULL) {
-            return;
-        }
+const static int OK = 0;
+const static int ERR = 1;
 
-        if(argv[1][0] == '%') {
-            int jid = atoi(argv[1]+1);
-            struct job_t *job = getjobjid(jobs, jid);
-            if(job == NULL) {
-                return;                 // 不存在后台作业
-            }
-            job->state = BG;
-            kill(-job->pid, SIGCONT);
-        }
-    } else {
-        if(argv[1] == NULL) {
-            return;
-        }
-        if(argv[1][0] == '%') {
-            int jid = atoi(argv[1] + 1);
-            struct job_t *job = getjobjid(jobs, jid);
-            if(job == NULL) {
-                return;
-            }
-            kill(-job->pid, SIGCONT);
-            job->state = FG;
-            waitfg(job->pid);
+static int isNum(char *str)
+{
+    for (int i = 0; str[i] != '\0'; ++i) {
+        if (str[i] < '0' || str[i] > '9') {
+            return ERR;
         }
     }
-    return;
+    return OK;
+}
+
+static void do_bg(char **argv)
+{
+    int jid = 0;
+    struct job_t *job = NULL;
+
+    if (argv[1][0] != '%') {
+        int pid = atoi(argv[1]);
+        job = getjobpid(jobs, pid);
+        if (job == NULL) {
+            printf("(%d): No such process\n", pid);
+            return;
+        }
+    } else {
+        jid = atoi(argv[1] + 1);
+        job = getjobjid(jobs, jid);
+        if(job == NULL) {
+            printf("%%%d: No such job\n", jid);
+            return;                 
+        }
+    }
+
+    if (job->state == BG) {
+        printf("bg: job %d already in background\n", jid);
+        return;
+    }
+    printf("[%d] (%d) %s", jid, job->pid, job->cmdline);
+    job->state = BG;
+    kill(-job->pid, SIGCONT);
+}
+
+static void do_fg(char **argv)
+{
+    int jid = 0;
+    struct job_t *job = NULL;
+
+    if (argv[1][0] != '%') {
+        int pid = atoi(argv[1]);
+        job = getjobpid(jobs, pid);
+        if (job == NULL) {
+            printf("(%d): No such process\n", pid);
+            return;
+        }
+    } else {
+        jid = atoi(argv[1] + 1);
+        job = getjobjid(jobs, jid);
+        if(job == NULL) {
+            printf("%%%d: No such job\n", jid);
+            return;                 
+        }
+    }
+
+    kill(-job->pid, SIGCONT);
+    job->state = FG;
+    waitfg(job->pid);
+}
+
+int check_argument(char **argv)
+{
+    if (argv[1][0] == '%') {
+        if (isNum(argv[1] + 1) != OK) {
+            return ERR;
+        }
+    } else {
+        if (isNum(argv[1]) != OK) {
+            return ERR;
+        }
+    }
+    return OK;
+}
+
+
+void do_bgfg(char **argv) 
+{
+    if (argv[1] == NULL) {
+        printf("%s command requires PID or %%jobid argument\n", argv[0]);
+        return;
+    }
+
+    if (check_argument(argv) != OK) {
+        printf("argument must be a PID or %%jobid\n");
+        return;
+    }
+
+    if (!strcmp(argv[0], "bg")) {
+        do_bg(argv);
+    } else {
+        do_fg(argv);
+    }
 }
 
 /* 
@@ -364,7 +441,6 @@ void sigchld_handler(int sig)
             printf("Job [%d] (%d) stopped by signal %d\n", jid, pid, WSTOPSIG(status));
             continue;
         } else {
-            // printf("Job [%d] (%d) exited\n", pid2jid(pid), pid);
         }
         deletejob(jobs, pid);
     }
